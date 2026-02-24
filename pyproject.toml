@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "equibot"
+version = "0.1.0"
+description = "Modular AI agents for processing financial reports using PydanticAI and edgartools."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = [
+    "pydantic>=2.0.0",
+    "pydantic-ai",
+    "pydantic-settings",
+    "edgartools",
+    "openai",
+    "python-dotenv",
+    "loguru",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "black",
+    "ruff",
+]
+
+[project.scripts]
+equibot = "equibot.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/equibot"]
