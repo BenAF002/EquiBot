@@ -1,0 +1,21 @@
+services:                         # each entry under here becomes one container
+  db:                             # our one service; "db" is just a name we chose
+    image: postgres:18            # which image to download from Docker Hub
+    container_name: finance-db    # friendly name instead of a generated one
+    restart: unless-stopped       # restart after crashes and after Docker starts
+    environment:                  # variables handed to the container
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}   # filled in from your .env file
+      POSTGRES_DB: finance        # database to create on first startup
+    ports:
+      - "127.0.0.1:5432:5432"     # host_address:host_port:container_port
+    volumes:
+      - pgdata:/var/lib/postgresql   # store data in the named volume below
+    healthcheck:                  # lets Docker report whether Postgres is ready
+      test: ["CMD-SHELL", "pg_isready -U postgres -d finance"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:                         # declares the named volume used above
