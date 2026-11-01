@@ -48,9 +48,7 @@ def _resolve_fiscal_period(company: Company,filing: EntityFiling) -> str:
     fye_day = int(fiscal_year_end[2:])
 
     # Infer the fiscal year end date that follows (or equals) period_end
-    fye_year = period_end.year
-    if (period_end.month, period_end.day) > (fye_month, fye_day):
-        fye_year += 1
+    fye_year = _resolve_fiscal_year(period_end, fiscal_year_end)
 
     # Months elapsed since the fiscal year start, based on the months between
     # period_end and fiscal year end (0 months remaining -> last quarter)
@@ -65,6 +63,18 @@ def _resolve_fiscal_period(company: Company,filing: EntityFiling) -> str:
     elif form_type in ("10-Q", "8-K"):
         return quarter_label
 
+def _resolve_fiscal_year(period_end: date | str, fiscal_year_end: str) -> int:
+    """Infer the fiscal-year calendar year from a period end and an MMDD year end."""
+    if isinstance(period_end, str):
+        period_end = date.fromisoformat(period_end)
+
+    fye_month = int(fiscal_year_end[:2])
+    fye_day = int(fiscal_year_end[2:])
+    fiscal_year = period_end.year
+    if (period_end.month, period_end.day) > (fye_month, fye_day):
+        fiscal_year += 1
+    return fiscal_year
+
 
 def upsert_company(company: Company, replace_entry: bool = False) -> int:
     """Update ref.company table with the given company information.
@@ -73,39 +83,21 @@ def upsert_company(company: Company, replace_entry: bool = False) -> int:
     Returns:
         int: The `company_id` of the inserted or updated company.
     """
-    ticker = company.tickers[0]
-    cik = company.cik
-    name = company.name
-    industry = company.industry
-    fiscal_year_end = company.fiscal_year_end
-
     with connect() as conn:
         cur = conn.cursor()
-        if replace_entry:
-            cur.execute(
-                """
-                REPLACE INTO ref.company (ticker, cik, name, industry, fiscal_year_end)
-                VALUES (%s, %s, %s, %s, %s)
-                RETURNING company_id
-                """,
-                (ticker, cik, name, industry, fiscal_year_end),
-            )
-        else:
-            cur.execute(
-                # uses `DO UPDATE` on conflict so that we can return `company_id`
-                # `SET` variables are mostly arbitrary, but all can change so can be worth updating
-                """
-                INSERT INTO ref.company (ticker, cik, name, industry, fiscal_year_end)
-                VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (ticker) DO UPDATE SET 
-                    name = EXCLUDED.name
-                    , industry = EXCLUDED.industry
-                    , fiscal_year_end = EXCLUDED.fiscal_year_end
-                RETURNING company_id
-                """,
-                (ticker, cik, name, industry, fiscal_year_end),
-            )
-        
+        cur.execute(
+            """
+            INSERT INTO ref.company (ticker, cik, name, industry, fiscal_year_end)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (cik) DO UPDATE SET
+                ticker = EXCLUDED.ticker,
+                name = EXCLUDED.name,
+                industry = EXCLUDED.industry,
+                fiscal_year_end = EXCLUDED.fiscal_year_end
+            RETURNING company_id
+            """,
+            (company.tickers[0], company.cik, company.name, company.industry, company.fiscal_year_end),
+        )
         company_id = cur.fetchone()["company_id"]
     
     return company_id
@@ -133,7 +125,13 @@ def _upsert_filing_record(conn, company: Company, filing: EntityFiling, company_
             , parser_version
         )
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (accession_no) DO UPDATE SET period_end = EXCLUDED.period_end
+        ON CONFLICT (accession_no) DO UPDATE SET 
+            period_end = EXCLUDED.period_end,
+            fiscal_year = EXCLUDED.fiscal_year,
+            fiscal_period = EXCLUDED.fiscal_period,
+            published_at = EXCLUDED.published_at,
+            source_url = EXCLUDED.source_url,
+            parser_version = EXCLUDED.parser_version
         RETURNING filing_id
         """,
         (
@@ -141,7 +139,7 @@ def _upsert_filing_record(conn, company: Company, filing: EntityFiling, company_
             filing.accession_number, 
             filing.form, 
             filing.period_of_report,
-            company.fiscal_year_end, 
+            _resolve_fiscal_year(filing.period_of_report, company.fiscal_year_end), 
             _resolve_fiscal_period(company, filing), 
             filing.filing_date, 
             filing.filing_url,
@@ -160,22 +158,21 @@ def _upsert_filing_sections(conn, filing, filing_id: int | str) -> int:
     for section in filing.obj().sections:
         section_pred = laya_res.get(section, {}).get("pred")  # item label is predicted by classifier
         rows.append((
-            filing_id, section_pred, section, filing.obj().sections.get(section).text(), PARSER_VERSION
+            filing_id, section, section_pred, filing.obj().sections.get(section).text(), PARSER_VERSION
         ))
 
     # upsert each section into `raw.filing_items`
-    # using .transaction() ensures all or none of the section inserts are applied
-    with conn.transaction():
-        conn.cursor().executemany(
-            """
-            INSERT INTO raw.filing_items (
-                filing_id, item_label, section_key, item_content, parser_version
-            )
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (filing_id, section_key, item_label) DO NOTHING
-            """,
-            rows
-        )
+    conn.cursor().executemany(
+        """
+        INSERT INTO raw.filing_items (filing_id, section_key, item_label, item_content, parser_version)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (filing_id, section_key) DO UPDATE SET
+            item_label = EXCLUDED.item_label,
+            item_content = EXCLUDED.item_content,
+            parser_version = EXCLUDED.parser_version
+        """,
+        rows
+    )
 
 
 def _upsert_xbrl_facts(conn, filing, filing_id: int | str) -> None:
@@ -221,7 +218,10 @@ def _upsert_xbrl_facts(conn, filing, filing_id: int | str) -> None:
 # upsert everything for one report filing
 def upsert_filing(company: Company, filing: EntityFiling, company_id: int | str | None = None) -> int:
     """Upsert a filing and its sections into the database at raw.filing and raw.filing_items."""
-    with connect() as conn:
+    conn = connect()
+    
+    # using .transaction() ensures all or none of the section inserts are applied
+    with conn.transaction():
         # attempt to get company_id from ref.company if not provided
         if company_id is None:
             ticker = company.tickers[0]
