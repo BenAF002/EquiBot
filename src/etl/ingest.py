@@ -10,7 +10,6 @@ from psycopg.types.json import Jsonb
 
 from .db import connect
 from .config import PARSER_VERSION
-from .classifiers import score_sections
 
 set_identity(os.environ["EDGAR_IDENTITY"])
 
@@ -152,22 +151,17 @@ def _upsert_filing_record(conn, company: Company, filing: EntityFiling, company_
 def _upsert_filing_sections(conn, filing, filing_id: int | str) -> int:
     """Upsert section into raw.filing_section"""
 
-    # get classification results for all sections
-    laya_res = score_sections(filing, max_len=100)
+    sections = filing.obj().sections
     rows = []
-    for section in filing.obj().sections:
-        section_pred = laya_res.get(section, {}).get("pred")  # item label is predicted by classifier
-        rows.append((
-            filing_id, section, section_pred, filing.obj().sections.get(section).text(), PARSER_VERSION
-        ))
+    for section in sections:
+        rows.append((filing_id, section, sections.get(section).text(), PARSER_VERSION))
 
     # upsert each section into `raw.filing_items`
     conn.cursor().executemany(
         """
-        INSERT INTO raw.filing_items (filing_id, section_key, item_label, item_content, parser_version)
-        VALUES (%s, %s, %s, %s, %s)
-        ON CONFLICT (filing_id, section_key) DO UPDATE SET
-            item_label = EXCLUDED.item_label,
+        INSERT INTO raw.filing_items (filing_id, section_key, item_content, parser_version)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (filing_id, section_key) DO UPDATE SET 
             item_content = EXCLUDED.item_content,
             parser_version = EXCLUDED.parser_version
         """,
