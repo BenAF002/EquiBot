@@ -10,29 +10,11 @@ from psycopg.types.json import Jsonb
 
 from .db import connect
 from .config import PARSER_VERSION
+from . import helpers as h
+from . import xbrl_load as xl
 
 set_identity(os.environ["EDGAR_IDENTITY"])
 
-
-## Helper functions for cleaning and normalizing data
-def clean(v):
-    """NaN/NaT -> None, numpy scalars -> Python scalars."""
-    if v is None:
-        return None
-    try:
-        if pd.isna(v):
-            return None
-    except (TypeError, ValueError):
-        pass
-    return v.item() if hasattr(v, "item") else v
-
-def clean_date(v):
-    v = clean(v)
-    return None if v is None else pd.Timestamp(v).date()
-
-def norm_concept(c):
-    """'us-gaap_Revenues' -> 'us-gaap:Revenues' so facts and statement lines agree."""
-    return c if ":" in c else c.replace("_", ":", 1)
 
 def _resolve_fiscal_period(company: Company,filing: EntityFiling) -> str:
     """Resolve the fiscal period from form type, period end, and fiscal year end"""
@@ -166,47 +148,7 @@ def _upsert_filing_sections(conn, filing, filing_id: int | str) -> int:
             parser_version = EXCLUDED.parser_version
         """,
         rows
-    )
-
-
-def _upsert_xbrl_facts(conn, filing, filing_id: int | str) -> None:
-    """Upsert XBRL facts into raw.xbrl_fact"""
-    df = filing.xbrl().query().by_dimension(None).to_dataframe()
-    # print("fact columns:", df.columns.tolist()) 
-
-    rows, skipped = [], 0
-    for r in df.to_dict("records"):
-        end = clean_date(r.get("period_end") or r.get("period_instant"))
-        if end is None:
-            skipped += 1
-            continue
-        raw_value = clean(r.get("value"))
-        num = pd.to_numeric(raw_value, errors="coerce")
-        is_num = not pd.isna(num)
-        rows.append((
-            filing_id,
-            norm_concept(r["concept"]),         # xbrl concept
-            clean_date(r.get("period_start")),  # xbrl period start
-            end,
-            Jsonb({}),
-            clean(r.get("unit")),                   # xbrl value unit
-            Decimal(str(num)) if is_num else None,  # xbrl value numeric
-            None if is_num else (str(raw_value) if raw_value is not None else None),  # xbrl value text
-        ))
-    conn.cursor().executemany(
-        """INSERT INTO raw.xbrl_fact
-            (filing_id, concept, period_start, period_end, dimensions,
-            unit, value_num, value_text)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT DO NOTHING""",
-        rows,
-    )
-    if skipped:
-        print(f"  skipped {skipped} facts with no period end")
-    return len(rows)
-
-
-        
+    )        
 
 
 # upsert everything for one report filing
@@ -228,5 +170,6 @@ def upsert_filing(company: Company, filing: EntityFiling, company_id: int | str 
 
         filing_id = _upsert_filing_record(conn, company, filing, company_id)
         _upsert_filing_sections(conn, filing, filing_id)    # upsert section bodies for the filing
-        _upsert_xbrl_facts(conn, filing, filing_id)         # upsert XBRL facts for the filing
-        return filing_id
+        xbrl_res = xl.load_xbrl(conn, filing.xbrl(), filing_id)         # upsert XBRL facts for the filing
+        res = {"filing": {"filing_id": filing_id}, "xbrl": xbrl_res}
+        return res
