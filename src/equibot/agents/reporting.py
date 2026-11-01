@@ -300,7 +300,7 @@ class TenKAgent:
         statements = get_statement_jsons(self.tenk)
 
         self.audit_res = await self.auditor.run(
-            user_prompt="verify the accuracy of the numbers cited in the document"
+            user_prompt="verify the accuracy of the numbers cited in the document",
             deps=AuditorDeps(
                 document=document,
                 company_name=self.tenk.company,

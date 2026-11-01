@@ -17,6 +17,12 @@ dependencies = [
     "openai",
     "python-dotenv",
     "loguru",
+    "lancedb>=0.29.2",
+    "llama-index>=0.14.15",
+    "llama-index-vector-stores-lancedb>=0.4.5",
+    "pageindexfork",
+    "psycopg[binary]>=3.3.6",
+    "tiktoken>=0.14.0",
 ]
 
 [project.optional-dependencies]
@@ -31,3 +37,6 @@ equibot = "equibot.main:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/equibot"]
+
+[tool.uv.sources]
+pageindexfork = { git = "https://github.com/BenAF002/PageIndexFork.git" }

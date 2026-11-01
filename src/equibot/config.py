@@ -16,6 +16,7 @@ else:
 class Settings(BaseSettings):
     openrouter_api_key: str
     sec_api_username: str
+    data_dir: str
 
     model_config = SettingsConfigDict(
         env_file=ENV_PATH, 
